@@ -1,0 +1,72 @@
+-- 🧹 Step 1a: Drop any previously existing temp table
+DROP TABLE IF EXISTS actor_changes;
+
+-- 📦 Step 1b: Create a temp table that identifies which actors have changed status
+CREATE TEMP TABLE actor_changes AS
+WITH current_actors AS (
+  -- 📥 Pull the current snapshot from the 'actors' table (most recent state)
+  SELECT * FROM actors
+),
+latest_versions AS (
+  -- 📤 Pull the most recent (currently active) rows from the SCD table
+  SELECT * FROM actors_history_scd
+  WHERE end_date IS NULL
+),
+joined AS (
+  -- 🔗 Join current snapshot with latest SCD version per actor
+  SELECT
+    a.actorid,
+    a.actor,
+    a.quality_class AS new_quality_class,
+    a.is_active AS new_is_active,
+    lv.quality_class AS old_quality_class,
+    lv.is_active AS old_is_active
+  FROM current_actors a
+  LEFT JOIN latest_versions lv
+    ON a.actorid = lv.actorid
+),
+changes_detected AS (
+  -- 🕵️ Identify actors whose status has changed compared to previous version
+  SELECT *,
+    CASE
+      WHEN old_quality_class IS NULL THEN TRUE                -- new actor
+      WHEN old_quality_class <> new_quality_class THEN TRUE  -- rating class changed
+      WHEN old_is_active <> new_is_active THEN TRUE          -- activity flag changed
+      ELSE FALSE
+    END AS did_change
+  FROM joined
+)
+-- 🚧 Only keep rows that represent actual changes
+SELECT *
+FROM changes_detected
+WHERE did_change = TRUE;
+
+
+-- 🔒 Step 2: Close old records by setting their end_date
+UPDATE actors_history_scd
+SET end_date = CURRENT_DATE
+WHERE actorid IN (
+  -- Only update actors who already had an old record (i.e., not brand new)
+  SELECT actorid
+  FROM actor_changes
+  WHERE old_quality_class IS NOT NULL
+)
+AND end_date IS NULL;  -- Only close the open-ended version
+
+-- 🆕 Step 3: Insert new records to capture current state as a new SCD version
+INSERT INTO actors_history_scd (
+  actorid,
+  actor,
+  quality_class,
+  is_active,
+  start_date,
+  end_date
+)
+SELECT
+  actorid,
+  actor,
+  new_quality_class,
+  new_is_active,
+  CURRENT_DATE,  -- start the new version today
+  NULL           -- leave end_date open — it's now the current version
+FROM actor_changes;
