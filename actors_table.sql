@@ -25,3 +25,5 @@ CREATE TABLE actors (
     is_active BOOLEAN,
     current_year INTEGER
 );
+
+CALL load_actors_yearly(1970, 2020);
