@@ -1,0 +1,58 @@
+WITH yearly_status AS (
+  SELECT
+    actorid,
+    actor,
+    year,
+    CASE
+      WHEN AVG(rating) > 8 THEN 'star'::quality_class
+      WHEN AVG(rating) > 7 THEN 'good'::quality_class
+      WHEN AVG(rating) > 6 THEN 'average'::quality_class
+      ELSE 'bad'::quality_class
+    END AS quality_class,
+    TRUE AS is_active
+  FROM actor_films
+  GROUP BY actorid, actor, year
+),
+status_with_lag AS (
+  SELECT *,
+    LAG(quality_class) OVER (PARTITION BY actorid ORDER BY year) AS prev_quality_class,
+    LAG(is_active) OVER (PARTITION BY actorid ORDER BY year) AS prev_is_active
+  FROM yearly_status
+),
+version_flags AS (
+  SELECT *,
+    CASE
+      WHEN prev_quality_class IS NULL THEN TRUE
+      WHEN prev_quality_class <> quality_class THEN TRUE
+      WHEN prev_is_active <> is_active THEN TRUE
+      ELSE FALSE
+    END AS did_change
+  FROM status_with_lag
+),
+version_ids AS (
+  SELECT *,
+    SUM(CASE WHEN did_change THEN 1 ELSE 0 END)
+      OVER (PARTITION BY actorid ORDER BY year) AS version_number
+  FROM version_flags
+),
+collapsed_versions AS (
+  SELECT
+    actorid,
+    actor,
+    quality_class,
+    is_active,
+    TO_DATE(MIN(year)::TEXT || '-01-01', 'YYYY-MM-DD') AS start_date,
+    TO_DATE(MAX(year)::TEXT || '-12-31', 'YYYY-MM-DD') AS end_date
+  FROM version_ids
+  GROUP BY actorid, actor, quality_class, is_active, version_number
+)
+
+INSERT INTO actors_history_scd (
+  actorid,
+  actor,
+  quality_class,
+  is_active,
+  start_date,
+  end_date
+)
+SELECT * FROM collapsed_versions;
