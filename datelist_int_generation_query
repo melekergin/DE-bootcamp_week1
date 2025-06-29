@@ -1,0 +1,30 @@
+WITH users AS (
+    SELECT * 
+    FROM user_devices_cumulated
+    WHERE date = DATE('2023-01-31')
+),
+series AS (
+    SELECT series_date::DATE AS date
+    FROM generate_series(DATE('2023-01-01'), DATE('2023-01-31'), INTERVAL '1 day') AS series_date
+),
+placeholder AS (
+    SELECT 
+        u.user_id,
+        u.browser_type,
+        s.date AS series_date,
+        CASE 
+            WHEN u.dates_active @> ARRAY[s.date] 
+            THEN CAST(POW(2, 31 - (DATE('2023-01-31') - s.date)) AS BIGINT)
+            ELSE 0
+        END AS placeholder_int_value
+    FROM users u
+    CROSS JOIN series s
+)
+
+SELECT
+  user_id,
+  browser_type,
+  CAST(SUM(placeholder_int_value) AS BIGINT) AS activity_bitfield,
+  BIT_COUNT(CAST(CAST(SUM(placeholder_int_value) AS BIGINT) AS BIT(32))) > 0 AS dim_is_monthly_aktiv
+FROM placeholder
+GROUP BY user_id, browser_type;
