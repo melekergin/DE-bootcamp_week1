@@ -1,0 +1,43 @@
+-- CREATE TABLE host_activity_reduced (
+--   host TEXT,
+--   month DATE,
+--   hit_array INTEGER[],             -- Number of hits per day of month
+--   unique_visitors INTEGER[],       -- Number of unique users per day
+--   update_ts TIMESTAMP
+-- );
+
+WITH series AS (
+  SELECT generate_series(
+    DATE('2023-01-01'),
+    DATE('2023-01-31'),
+    INTERVAL '1 day'
+  )::DATE AS day
+),
+daily_stats AS (
+  SELECT
+    e.host,
+    DATE(CAST(e.event_time AS TIMESTAMP)) AS event_date,
+    COUNT(*) AS hits,
+    COUNT(DISTINCT e.user_id) AS unique_visitors
+  FROM events e
+  WHERE DATE(CAST(e.event_time AS TIMESTAMP)) BETWEEN DATE('2023-01-01') AND DATE('2023-01-31')
+  GROUP BY e.host, DATE(CAST(e.event_time AS TIMESTAMP))
+),
+host_day_stats AS (
+  SELECT
+    s.day,
+    d.host,
+    COALESCE(d.hits, 0) AS hits,
+    COALESCE(d.unique_visitors, 0) AS unique_visitors
+  FROM series s
+  LEFT JOIN daily_stats d ON s.day = d.event_date
+)
+SELECT
+  host,
+  DATE('2023-01-01') AS month,
+  ARRAY_AGG(hits ORDER BY day) AS hit_array,
+  ARRAY_AGG(unique_visitors ORDER BY day) AS unique_visitors,
+  NOW() AS update_ts
+FROM host_day_stats
+GROUP BY host;
+
