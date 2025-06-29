@@ -1,0 +1,192 @@
+--1--
+WITH deduped AS (
+    SELECT 
+       *,
+        ROW_NUMBER() OVER(PARTITION BY game_id, team_id, player_id) AS row_num
+    FROM game_details
+)
+
+SELECT  
+   *
+FROM deduped
+WHERE row_num = 1;
+
+--2--
+
+-- drop table user_devices_cumulated
+
+-- CREATE TABLE user_devices_cumulated (
+--   user_id        TEXT,
+--   browser_type   TEXT,
+--   dates_active   DATE[],
+--   date           DATE,
+--   PRIMARY KEY (user_id, browser_type, date)
+-- );
+
+
+--3--A cumulative query to generate device_activity_datelist from events
+WITH yesterday AS (
+  SELECT *
+  FROM user_devices_cumulated
+  WHERE date = DATE('2023-01-30')
+),
+today AS (
+  SELECT
+    CAST(e.user_id AS TEXT) AS user_id,
+    d.browser_type,
+    DATE(CAST(e.event_time AS TIMESTAMP)) AS date_active
+  FROM events e
+  JOIN devices d ON e.device_id = d.device_id
+  WHERE DATE(CAST(e.event_time AS TIMESTAMP)) = DATE('2023-01-31')
+    AND e.user_id IS NOT NULL
+  GROUP BY e.user_id, d.browser_type, DATE(CAST(e.event_time AS TIMESTAMP))
+)
+
+INSERT INTO user_devices_cumulated (user_id, browser_type, dates_active, date)
+SELECT
+  COALESCE(t.user_id, y.user_id) AS user_id,
+  COALESCE(t.browser_type, y.browser_type) AS browser_type,
+  CASE
+    WHEN y.dates_active IS NULL THEN ARRAY[t.date_active]
+    WHEN t.date_active IS NULL THEN y.dates_active
+    ELSE y.dates_active || ARRAY[t.date_active]
+  END AS dates_active,
+  COALESCE(t.date_active, y.date + INTERVAL '1 day') AS date
+FROM today t
+FULL OUTER JOIN yesterday y
+  ON t.user_id = y.user_id AND t.browser_type = y.browser_type;
+
+
+
+--4--
+
+
+
+
+
+WITH users AS (
+    SELECT * 
+    FROM user_devices_cumulated
+    WHERE date = DATE('2023-01-31')
+),
+series AS (
+    SELECT series_date::DATE AS date
+    FROM generate_series(DATE('2023-01-01'), DATE('2023-01-31'), INTERVAL '1 day') AS series_date
+),
+placeholder AS (
+    SELECT 
+        u.user_id,
+        u.browser_type,
+        s.date AS series_date,
+        CASE 
+            WHEN u.dates_active @> ARRAY[s.date] 
+            THEN CAST(POW(2, 31 - (DATE('2023-01-31') - s.date)) AS BIGINT)
+            ELSE 0
+        END AS placeholder_int_value
+    FROM users u
+    CROSS JOIN series s
+)
+
+SELECT
+  user_id,
+  browser_type,
+  CAST(SUM(placeholder_int_value) AS BIGINT) AS activity_bitfield,
+  BIT_COUNT(CAST(CAST(SUM(placeholder_int_value) AS BIGINT) AS BIT(32))) > 0 AS dim_is_monthly_aktiv
+FROM placeholder
+GROUP BY user_id, browser_type;
+
+
+
+
+
+
+
+
+
+
+
+
+--5--
+
+-- CREATE TABLE hosts_cumulated (
+--   host TEXT,
+--   host_activity_datelist DATE[],
+--   date DATE,
+--   PRIMARY KEY (host, date)
+-- );
+
+WITH yesterday AS (
+  SELECT *
+  FROM hosts_cumulated
+  WHERE date = DATE('2023-01-30')
+),
+today AS (
+  SELECT
+    host,
+    DATE(CAST(event_time AS TIMESTAMP)) AS date_active
+  FROM events
+  WHERE DATE(CAST(event_time AS TIMESTAMP)) = DATE('2023-01-31')
+  GROUP BY host, DATE(CAST(event_time AS TIMESTAMP))
+)
+
+INSERT INTO hosts_cumulated (host, host_activity_datelist, date)
+SELECT
+  COALESCE(t.host, y.host) AS host,
+  CASE
+    WHEN y.host_activity_datelist IS NULL THEN ARRAY[t.date_active]
+    WHEN t.date_active IS NULL THEN y.host_activity_datelist
+    ELSE y.host_activity_datelist || ARRAY[t.date_active]
+  END AS host_activity_datelist,
+  COALESCE(t.date_active, y.date + INTERVAL '1 day') AS date
+FROM today t
+FULL OUTER JOIN yesterday y
+  ON t.host = y.host;
+
+--6--
+
+-- CREATE TABLE host_activity_reduced (
+--   host TEXT,
+--   month DATE,
+--   hit_array INTEGER[],             -- Number of hits per day of month
+--   unique_visitors INTEGER[],       -- Number of unique users per day
+--   update_ts TIMESTAMP
+-- );
+
+WITH series AS (
+  SELECT generate_series(
+    DATE('2023-01-01'),
+    DATE('2023-01-31'),
+    INTERVAL '1 day'
+  )::DATE AS day
+),
+daily_stats AS (
+  SELECT
+    e.host,
+    DATE(CAST(e.event_time AS TIMESTAMP)) AS event_date,
+    COUNT(*) AS hits,
+    COUNT(DISTINCT e.user_id) AS unique_visitors
+  FROM events e
+  WHERE DATE(CAST(e.event_time AS TIMESTAMP)) BETWEEN DATE('2023-01-01') AND DATE('2023-01-31')
+  GROUP BY e.host, DATE(CAST(e.event_time AS TIMESTAMP))
+),
+host_day_stats AS (
+  SELECT
+    s.day,
+    d.host,
+    COALESCE(d.hits, 0) AS hits,
+    COALESCE(d.unique_visitors, 0) AS unique_visitors
+  FROM series s
+  LEFT JOIN daily_stats d ON s.day = d.event_date
+)
+SELECT
+  host,
+  DATE('2023-01-01') AS month,
+  ARRAY_AGG(hits ORDER BY day) AS hit_array,
+  ARRAY_AGG(unique_visitors ORDER BY day) AS unique_visitors,
+  NOW() AS update_ts
+FROM host_day_stats
+GROUP BY host;
+
+
+
+  
